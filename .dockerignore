@@ -1,0 +1,14 @@
+.git
+.env
+__pycache__/
+*.pyc
+.DS_Store
+
+data/
+runtime/
+_remote_artifacts/
+
+.venv/
+.venv-roomcast/
+venv/
+env/

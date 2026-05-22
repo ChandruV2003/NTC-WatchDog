@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Selenium/Chrome
+chromedriver/
+chromedriver.exe
+*.log
+screenshots/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SSH Keys
+*.key
+*.pem
+
+# Config files (may contain sensitive data)
+config.py
+.env
+
+# Logs
+*.log
+turbowatch.log
+
+# Local runtime state
+data/
+runtime/
+_remote_artifacts/

@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.ntc.txt /app/requirements.ntc.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg gcc libc6-dev libopus0 \
+    && pip install --no-cache-dir -r /app/requirements.ntc.txt \
+    && apt-get purge -y --auto-remove gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /app
+
+CMD ["python3", "ntc_watchdog.py"]
