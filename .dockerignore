@@ -9,6 +9,6 @@ runtime/
 _remote_artifacts/
 
 .venv/
-.venv-roomcast/
+.venv-ntc/
 venv/
 env/
