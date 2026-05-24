@@ -21,9 +21,12 @@ from ntc_store import NTCStore
 
 class _ProbeHandler(BaseHTTPRequestHandler):
     status_active = True
+    status_ingesting = False
+    status_desired = False
     empty_playlist = False
     secure_redirect = False
     prefixed_segment = False
+    playlist_requests = []
 
     def log_message(self, format, *args):
         return
@@ -55,17 +58,25 @@ class _ProbeHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             active = "true" if self.status_active else "false"
+            ingesting = "true" if self.status_ingesting else "false"
+            desired = "true" if self.status_desired else "false"
             payload = (
                 '{"slug": "room-b", "host_slug": "hp-pavilion-14m-ba1xx", '
-                '"room_alias": "Room B", "broadcasting": %s, "is_ingesting": false, '
-                '"desired_active": false, "listener_count": 1, "current_device": "CQ 1&2", '
+                '"room_alias": "Room B", "broadcasting": %s, "is_ingesting": %s, '
+                '"desired_active": %s, "listener_count": 1, "current_device": "CQ 1&2", '
                 '"stream_transport": "hls", "connection_quality_percent": 100, '
                 '"connection_quality_label": "Buffered", "signal_level_db": -24.5, '
                 '"signal_peak_db": -6.5, "signal_level_percent": 72, "signal_peak_percent": 91}'
-            ) % active
+            ) % (active, ingesting, desired)
             self.wfile.write(payload.encode("utf-8"))
             return
         if self.path.startswith("/listen/live.m3u8"):
+            self.playlist_requests.append(
+                {
+                    "path": self.path,
+                    "watchdog_header": self.headers.get("X-NTC-Watchdog-Probe"),
+                }
+            )
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.apple.mpegurl")
             self.end_headers()
@@ -87,7 +98,15 @@ class _ProbeHandler(BaseHTTPRequestHandler):
 
 
 class _ProbeServer:
-    def __init__(self, *, empty_playlist=False, secure_redirect=False):
+    def __init__(
+        self,
+        *,
+        empty_playlist=False,
+        secure_redirect=False,
+        status_active=True,
+        status_ingesting=False,
+        status_desired=False,
+    ):
         handler = type(
             "ProbeHandler",
             (_ProbeHandler,),
@@ -95,6 +114,10 @@ class _ProbeServer:
                 "empty_playlist": empty_playlist,
                 "secure_redirect": secure_redirect,
                 "prefixed_segment": False,
+                "status_active": status_active,
+                "status_ingesting": status_ingesting,
+                "status_desired": status_desired,
+                "playlist_requests": [],
             },
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -230,9 +253,22 @@ class NTCWatchdogTests(unittest.TestCase):
 
         self.assertTrue(all(result.ok for result in results))
         self.assertEqual([result.name for result in results], ["public-page", "live-status", "hls-playlist", "hls-segment"])
+        playlist_requests = server.server.RequestHandlerClass.playlist_requests
+        self.assertEqual(len(playlist_requests), 1)
+        self.assertIn("watchdog=1", playlist_requests[0]["path"])
+        self.assertEqual(playlist_requests[0]["watchdog_header"], "1")
         live_status = next(result for result in results if result.name == "live-status")
         self.assertEqual(live_status.details["room_slug"], "room-b")
         self.assertEqual(live_status.details["signal_level_db"], -24.5)
+
+    def test_check_client_routes_defers_hls_when_source_is_not_broadcasting(self):
+        with _ProbeServer(status_active=False, status_ingesting=True, status_desired=True) as server:
+            results = check_client_routes(server.base_url, public_pin="7070", timeout_seconds=1, hls_timeout_seconds=1)
+
+        self.assertTrue(all(result.ok for result in results))
+        self.assertEqual([result.name for result in results], ["public-page", "live-status", "hls-playlist"])
+        self.assertEqual(server.server.RequestHandlerClass.playlist_requests, [])
+        self.assertEqual(results[-1].details["reason"], "source-not-broadcasting")
 
     def test_record_audio_level_monitoring_persists_live_status_samples(self):
         with tempfile.TemporaryDirectory() as tempdir:

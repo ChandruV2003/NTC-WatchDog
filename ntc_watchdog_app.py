@@ -363,6 +363,22 @@ def check_client_routes(
         )
         if not active:
             return results
+        if not live_status.get("broadcasting"):
+            add_ok(
+                "hls-playlist",
+                status_url,
+                status_code,
+                0,
+                "HLS probe skipped until source audio is broadcasting",
+                {
+                    "reason": "source-not-broadcasting",
+                    "is_ingesting": bool(live_status.get("is_ingesting")),
+                    "desired_active": bool(live_status.get("desired_active")),
+                    "current_device": live_status.get("current_device"),
+                    "connection_quality_label": live_status.get("connection_quality_label"),
+                },
+            )
+            return results
 
         hls_match = None
         marker = "/listen/live.m3u8?client="
@@ -385,12 +401,14 @@ def check_client_routes(
             return results
 
         playlist_url = _probe_url(base, hls_match)
+        if "watchdog=1" not in playlist_url:
+            playlist_url = f"{playlist_url}{'&' if '?' in playlist_url else '?'}watchdog=1"
         status_code, body, elapsed_ms, final_url = _request(
             opener,
             playlist_url,
             timeout_seconds=hls_timeout_seconds,
             accept="application/vnd.apple.mpegurl,*/*",
-            headers=auth_headers,
+            headers={**auth_headers, "X-NTC-Watchdog-Probe": "1"},
         )
         if status_code != 200:
             results.append(
@@ -428,7 +446,7 @@ def check_client_routes(
             segment_url,
             timeout_seconds=timeout_seconds,
             accept="audio/*,video/mp2t,*/*",
-            headers=auth_headers,
+            headers={**auth_headers, "X-NTC-Watchdog-Probe": "1"},
         )
         if status_code != 200 or len(body) < 256:
             results.append(

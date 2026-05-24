@@ -27,7 +27,7 @@ _DEFAULT_HOSTS = [
             {"day": "FRI", "start": "10:20", "end": "13:00", "enabled": False},
             {"day": "FRI", "start": "18:50", "end": "21:00", "enabled": True},
             {"day": "SAT", "start": "10:20", "end": "13:00", "enabled": False},
-            {"day": "SAT", "start": "17:50", "end": "20:30", "enabled": True},
+            {"day": "SAT", "start": "17:50", "end": "20:00", "enabled": True},
             {"day": "SUN", "start": "10:20", "end": "13:00", "enabled": False},
         ],
     },

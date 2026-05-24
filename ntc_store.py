@@ -144,6 +144,11 @@ def _is_silence_warning(message: str | None) -> bool:
     return (message or "").strip().startswith(SILENCE_WARNING_PREFIX)
 
 
+def _is_source_unavailable_error(message: str | None) -> bool:
+    normalized = (message or "").strip().casefold()
+    return normalized.startswith("no compatible input device")
+
+
 def _silence_warning_expired(runtime: dict | None) -> bool:
     if not runtime or not _is_silence_warning(runtime.get("last_error")):
         return False
@@ -157,6 +162,8 @@ def _post_end_primary_input_present(host_row: sqlite3.Row, runtime: dict | None)
     """Only extend a scheduled meeting after end time while the main mixer feed is present."""
 
     if not runtime or not runtime.get("is_ingesting"):
+        return False
+    if _is_source_unavailable_error(runtime.get("last_error")):
         return False
 
     current_device = (runtime.get("current_device") or "").strip()
