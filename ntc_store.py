@@ -344,6 +344,31 @@ class NTCStore:
                 CREATE INDEX IF NOT EXISTS idx_audio_level_samples_room_time
                 ON audio_level_samples(room_slug, sampled_at DESC);
 
+                CREATE TABLE IF NOT EXISTS system_resource_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sampled_at TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'watchdog',
+                    container_name TEXT NOT NULL,
+                    cpu_percent REAL,
+                    memory_usage_bytes INTEGER NOT NULL DEFAULT 0,
+                    memory_limit_bytes INTEGER NOT NULL DEFAULT 0,
+                    memory_percent REAL,
+                    network_rx_bytes INTEGER NOT NULL DEFAULT 0,
+                    network_tx_bytes INTEGER NOT NULL DEFAULT 0,
+                    block_read_bytes INTEGER NOT NULL DEFAULT 0,
+                    block_write_bytes INTEGER NOT NULL DEFAULT 0,
+                    pids INTEGER,
+                    system_load_1 REAL,
+                    system_load_5 REAL,
+                    system_load_15 REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_system_resource_samples_time
+                ON system_resource_samples(sampled_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_system_resource_samples_container_time
+                ON system_resource_samples(container_name, sampled_at DESC);
+
                 CREATE TABLE IF NOT EXISTS transcript_segments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     room_slug TEXT NOT NULL,
@@ -1860,6 +1885,126 @@ class NTCStore:
             )
             return int(cursor.rowcount or 0)
 
+    def record_system_resource_sample(
+        self,
+        container_name: str,
+        *,
+        source: str = "watchdog",
+        cpu_percent: float | None = None,
+        memory_usage_bytes: int = 0,
+        memory_limit_bytes: int = 0,
+        memory_percent: float | None = None,
+        network_rx_bytes: int = 0,
+        network_tx_bytes: int = 0,
+        block_read_bytes: int = 0,
+        block_write_bytes: int = 0,
+        pids: int | None = None,
+        system_load_1: float | None = None,
+        system_load_5: float | None = None,
+        system_load_15: float | None = None,
+        sampled_at: str | None = None,
+    ) -> int:
+        timestamp = sampled_at or _utc_now()
+        name = (container_name or "").strip()
+        if not name:
+            raise ValueError("container_name is required")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO system_resource_samples (
+                    sampled_at,
+                    source,
+                    container_name,
+                    cpu_percent,
+                    memory_usage_bytes,
+                    memory_limit_bytes,
+                    memory_percent,
+                    network_rx_bytes,
+                    network_tx_bytes,
+                    block_read_bytes,
+                    block_write_bytes,
+                    pids,
+                    system_load_1,
+                    system_load_5,
+                    system_load_15
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    (source or "watchdog").strip() or "watchdog",
+                    name,
+                    cpu_percent,
+                    max(0, int(memory_usage_bytes or 0)),
+                    max(0, int(memory_limit_bytes or 0)),
+                    memory_percent,
+                    max(0, int(network_rx_bytes or 0)),
+                    max(0, int(network_tx_bytes or 0)),
+                    max(0, int(block_read_bytes or 0)),
+                    max(0, int(block_write_bytes or 0)),
+                    None if pids is None else max(0, int(pids or 0)),
+                    system_load_1,
+                    system_load_5,
+                    system_load_15,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def system_resource_summary(self, *, window_seconds: int = 300, container_names: list[str] | None = None):
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(1, int(window_seconds)))).isoformat()
+        names = [(name or "").strip() for name in (container_names or []) if (name or "").strip()]
+        where = ["sampled_at >= ?"]
+        params: list = [cutoff]
+        if names:
+            where.append(f"container_name IN ({','.join('?' for _ in names)})")
+            params.extend(names)
+        where_sql = " AND ".join(where)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT container_name,
+                       COUNT(*) AS sample_count,
+                       AVG(cpu_percent) AS avg_cpu_percent,
+                       MAX(cpu_percent) AS max_cpu_percent,
+                       AVG(memory_percent) AS avg_memory_percent,
+                       MAX(memory_percent) AS max_memory_percent,
+                       MAX(memory_usage_bytes) AS max_memory_usage_bytes,
+                       MAX(network_rx_bytes) AS max_network_rx_bytes,
+                       MAX(network_tx_bytes) AS max_network_tx_bytes
+                FROM system_resource_samples
+                WHERE {where_sql}
+                GROUP BY container_name
+                ORDER BY container_name
+                """,
+                params,
+            ).fetchall()
+            latest = connection.execute(
+                f"""
+                SELECT sampled_at, container_name, cpu_percent, memory_usage_bytes,
+                       memory_limit_bytes, memory_percent, network_rx_bytes,
+                       network_tx_bytes, block_read_bytes, block_write_bytes, pids,
+                       system_load_1, system_load_5, system_load_15
+                FROM system_resource_samples
+                WHERE {where_sql}
+                ORDER BY sampled_at DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return {
+            "containers": {row["container_name"]: dict(row) for row in rows},
+            "latest": dict(latest) if latest else None,
+        }
+
+    def prune_system_resource_samples(self, *, retain_days: int = 14):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(retain_days)))).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM system_resource_samples WHERE sampled_at < ?",
+                (cutoff,),
+            )
+            return int(cursor.rowcount or 0)
+
     def record_transcript_segment(
         self,
         room_slug: str,
@@ -2223,6 +2368,20 @@ class NTCStore:
                 """,
                 (row["room_slug"], row["started_at"], ended_at),
             ).fetchall()
+            resource_samples = connection.execute(
+                """
+                SELECT sampled_at, source, container_name, cpu_percent,
+                       memory_usage_bytes, memory_limit_bytes, memory_percent,
+                       network_rx_bytes, network_tx_bytes, block_read_bytes,
+                       block_write_bytes, pids, system_load_1, system_load_5,
+                       system_load_15
+                FROM system_resource_samples
+                WHERE sampled_at >= ?
+                  AND sampled_at <= ?
+                ORDER BY sampled_at
+                """,
+                (row["started_at"], ended_at),
+            ).fetchall()
             transcripts = connection.execute(
                 """
                 SELECT host_slug, provider, model, started_at, ended_at, received_at, text
@@ -2272,6 +2431,26 @@ class NTCStore:
                     "connection_quality_label": sample["connection_quality_label"],
                 }
                 for sample in audio_levels
+            ]
+            summary["resource_samples"] = [
+                {
+                    "sampled_at": sample["sampled_at"],
+                    "source": sample["source"],
+                    "container_name": sample["container_name"],
+                    "cpu_percent": sample["cpu_percent"],
+                    "memory_usage_bytes": sample["memory_usage_bytes"],
+                    "memory_limit_bytes": sample["memory_limit_bytes"],
+                    "memory_percent": sample["memory_percent"],
+                    "network_rx_bytes": sample["network_rx_bytes"],
+                    "network_tx_bytes": sample["network_tx_bytes"],
+                    "block_read_bytes": sample["block_read_bytes"],
+                    "block_write_bytes": sample["block_write_bytes"],
+                    "pids": sample["pids"],
+                    "system_load_1": sample["system_load_1"],
+                    "system_load_5": sample["system_load_5"],
+                    "system_load_15": sample["system_load_15"],
+                }
+                for sample in resource_samples
             ]
             summary["transcripts"] = [
                 {

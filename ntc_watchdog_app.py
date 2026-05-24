@@ -561,6 +561,179 @@ def record_audio_level_monitoring(
     }
 
 
+def _decode_chunked_body(body: bytes) -> bytes:
+    decoded = bytearray()
+    cursor = 0
+    while cursor < len(body):
+        line_end = body.find(b"\r\n", cursor)
+        if line_end < 0:
+            break
+        size_text = body[cursor:line_end].split(b";", 1)[0].strip()
+        try:
+            chunk_size = int(size_text, 16)
+        except ValueError:
+            return body
+        cursor = line_end + 2
+        if chunk_size == 0:
+            break
+        decoded.extend(body[cursor:cursor + chunk_size])
+        cursor += chunk_size + 2
+    return bytes(decoded)
+
+
+def _docker_get_json(docker_socket_path: str, request_path: str, *, timeout_seconds: float = 5.0):
+    request = (
+        f"GET {request_path} HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(max(1.0, float(timeout_seconds)))
+        client.connect(docker_socket_path)
+        client.sendall(request)
+        response = bytearray()
+        while True:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            response.extend(chunk)
+
+    header_bytes, separator, body = bytes(response).partition(b"\r\n\r\n")
+    if not separator:
+        raise RuntimeError("Docker response did not include HTTP headers")
+    header_text = header_bytes.decode("iso-8859-1", errors="replace")
+    status_line = header_text.splitlines()[0] if header_text else ""
+    try:
+        status_code = int(status_line.split(" ", 2)[1])
+    except Exception as exc:
+        raise RuntimeError(f"Unparseable Docker response: {status_line}") from exc
+    if status_code < 200 or status_code >= 300:
+        raise RuntimeError(f"Docker API request failed: {status_line}")
+    if "transfer-encoding: chunked" in header_text.casefold():
+        body = _decode_chunked_body(body)
+    return json.loads(body.decode("utf-8"))
+
+
+def _int_value(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _docker_cpu_percent(stats: dict) -> float | None:
+    cpu_stats = stats.get("cpu_stats") or {}
+    precpu_stats = stats.get("precpu_stats") or {}
+    cpu_usage = cpu_stats.get("cpu_usage") or {}
+    precpu_usage = precpu_stats.get("cpu_usage") or {}
+    cpu_delta = _int_value(cpu_usage.get("total_usage")) - _int_value(precpu_usage.get("total_usage"))
+    system_delta = _int_value(cpu_stats.get("system_cpu_usage")) - _int_value(precpu_stats.get("system_cpu_usage"))
+    if cpu_delta <= 0 or system_delta <= 0:
+        return None
+    online_cpus = _int_value(cpu_stats.get("online_cpus"))
+    if online_cpus <= 0:
+        online_cpus = len(cpu_usage.get("percpu_usage") or []) or 1
+    return (cpu_delta / system_delta) * online_cpus * 100.0
+
+
+def _docker_memory_usage(memory_stats: dict) -> int:
+    usage = _int_value(memory_stats.get("usage"))
+    stat_values = memory_stats.get("stats") or {}
+    cache = _int_value(stat_values.get("inactive_file"), _int_value(stat_values.get("cache")))
+    return max(0, usage - cache)
+
+
+def _docker_block_io(stats: dict) -> tuple[int, int]:
+    read_bytes = 0
+    write_bytes = 0
+    entries = ((stats.get("blkio_stats") or {}).get("io_service_bytes_recursive") or [])
+    for entry in entries:
+        op = str(entry.get("op") or "").casefold()
+        value = _int_value(entry.get("value"))
+        if op == "read":
+            read_bytes += value
+        elif op == "write":
+            write_bytes += value
+    return read_bytes, write_bytes
+
+
+def collect_container_resource_stats(docker_socket_path: str, container_name: str) -> dict:
+    stats = _docker_get_json(
+        docker_socket_path,
+        f"/containers/{quote(container_name, safe='')}/stats?stream=false&one-shot=true",
+    )
+    memory_stats = stats.get("memory_stats") or {}
+    memory_usage = _docker_memory_usage(memory_stats)
+    memory_limit = _int_value(memory_stats.get("limit"))
+    networks = stats.get("networks") or {}
+    network_rx = sum(_int_value(network.get("rx_bytes")) for network in networks.values())
+    network_tx = sum(_int_value(network.get("tx_bytes")) for network in networks.values())
+    block_read, block_write = _docker_block_io(stats)
+    load_1 = load_5 = load_15 = None
+    if hasattr(os, "getloadavg"):
+        try:
+            load_1, load_5, load_15 = os.getloadavg()
+        except OSError:
+            load_1 = load_5 = load_15 = None
+    return {
+        "container_name": container_name,
+        "cpu_percent": _docker_cpu_percent(stats),
+        "memory_usage_bytes": memory_usage,
+        "memory_limit_bytes": memory_limit,
+        "memory_percent": (memory_usage / memory_limit * 100.0) if memory_limit > 0 else None,
+        "network_rx_bytes": network_rx,
+        "network_tx_bytes": network_tx,
+        "block_read_bytes": block_read,
+        "block_write_bytes": block_write,
+        "pids": _int_value((stats.get("pids_stats") or {}).get("current"), 0),
+        "system_load_1": load_1,
+        "system_load_5": load_5,
+        "system_load_15": load_15,
+    }
+
+
+def record_resource_monitoring(
+    store: NTCStore,
+    *,
+    docker_socket_path: str,
+    container_names: list[str],
+    retain_days: int = 14,
+    collect_stats=collect_container_resource_stats,
+):
+    names = [name for name in _split_csv(",".join(container_names)) if name]
+    if not names:
+        return {"recorded": False, "samples": [], "errors": [], "reason": "no-containers"}
+
+    samples = []
+    errors = []
+    for container_name in names:
+        try:
+            stats = collect_stats(docker_socket_path, container_name)
+            sample_id = store.record_system_resource_sample(
+                container_name,
+                source="watchdog",
+                cpu_percent=_float_or_none(stats.get("cpu_percent")),
+                memory_usage_bytes=_int_value(stats.get("memory_usage_bytes")),
+                memory_limit_bytes=_int_value(stats.get("memory_limit_bytes")),
+                memory_percent=_float_or_none(stats.get("memory_percent")),
+                network_rx_bytes=_int_value(stats.get("network_rx_bytes")),
+                network_tx_bytes=_int_value(stats.get("network_tx_bytes")),
+                block_read_bytes=_int_value(stats.get("block_read_bytes")),
+                block_write_bytes=_int_value(stats.get("block_write_bytes")),
+                pids=_int_value(stats.get("pids")),
+                system_load_1=_float_or_none(stats.get("system_load_1")),
+                system_load_5=_float_or_none(stats.get("system_load_5")),
+                system_load_15=_float_or_none(stats.get("system_load_15")),
+            )
+            samples.append({"sample_id": sample_id, **stats})
+        except Exception as exc:
+            errors.append({"container_name": container_name, "error": str(exc)})
+
+    store.prune_system_resource_samples(retain_days=retain_days)
+    return {"recorded": bool(samples), "samples": samples, "errors": errors}
+
+
 def _restart_container(docker_socket_path: str, container_name: str, *, timeout_seconds: int = 10):
     request_path = f"/containers/{quote(container_name, safe='')}/restart?t={max(1, int(timeout_seconds))}"
     request = (
@@ -980,6 +1153,9 @@ def main():
     parser.add_argument("--level-window-seconds", type=int, default=int(os.getenv("NTC_LEVEL_MONITOR_WINDOW_SECONDS", "300")), help="Rolling level monitor window")
     parser.add_argument("--level-min-samples", type=int, default=int(os.getenv("NTC_LEVEL_MONITOR_MIN_SAMPLES", "3")), help="Minimum samples before level monitor warnings")
     parser.add_argument("--level-retain-days", type=int, default=int(os.getenv("NTC_LEVEL_MONITOR_RETAIN_DAYS", "14")), help="Days to retain level monitor samples")
+    parser.add_argument("--record-resource-stats", action=argparse.BooleanOptionalAction, default=_bool_env("NTC_RESOURCE_MONITOR_ENABLED", True), help="Persist Docker CPU/memory/network samples")
+    parser.add_argument("--resource-containers", default=os.getenv("NTC_RESOURCE_MONITOR_CONTAINERS", "ntc-webcall,ntc-hls-nginx,ntc-watchdog"), help="Comma-separated Docker containers to sample")
+    parser.add_argument("--resource-retain-days", type=int, default=int(os.getenv("NTC_RESOURCE_MONITOR_RETAIN_DAYS", "14")), help="Days to retain resource monitor samples")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     args = parser.parse_args()
 
@@ -1016,6 +1192,23 @@ def main():
             retain_days=args.level_retain_days,
         )
         issues.extend(level_monitor.get("issues") or [])
+    resource_monitor = {"recorded": False, "samples": [], "errors": []}
+    if args.record_resource_stats:
+        resource_monitor = record_resource_monitoring(
+            store,
+            docker_socket_path=docker_socket_path,
+            container_names=_split_csv(args.resource_containers),
+            retain_days=args.resource_retain_days,
+        )
+        if args.record_incidents:
+            for error in resource_monitor.get("errors", []):
+                store.record_event(
+                    component="watchdog",
+                    event_type="resource-monitor-failed",
+                    message=f"NTC resource monitor failed for {error['container_name']}: {error['error']}",
+                    level="warn",
+                    details=error,
+                )
     remediation = {"attempted": False, "status": "not-needed"}
 
     if not health.ok or failed_client_probes:
@@ -1169,6 +1362,7 @@ def main():
                 **level_monitor,
                 "issues": [asdict(issue) for issue in level_monitor.get("issues", [])],
             },
+            "resource_monitor": resource_monitor,
             "remediation": remediation,
             "email_alerts": email_status,
         }

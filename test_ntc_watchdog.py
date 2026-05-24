@@ -15,6 +15,7 @@ from ntc_watchdog_app import (
     maybe_remediate_server,
     maybe_send_email_alerts,
     record_audio_level_monitoring,
+    record_resource_monitoring,
 )
 from ntc_store import NTCStore
 
@@ -290,6 +291,40 @@ class NTCWatchdogTests(unittest.TestCase):
             summary = store.audio_level_summary("room-b", window_seconds=300)
             self.assertEqual(summary["sample_count"], 1)
             self.assertEqual(summary["max_signal_level_db"], -24.5)
+
+    def test_record_resource_monitoring_persists_container_samples(self):
+        def fake_collect(socket_path, container_name):
+            return {
+                "container_name": container_name,
+                "cpu_percent": 37.5 if container_name == "ntc-webcall" else 2.5,
+                "memory_usage_bytes": 128 * 1024 * 1024,
+                "memory_limit_bytes": 1024 * 1024 * 1024,
+                "memory_percent": 12.5,
+                "network_rx_bytes": 4096,
+                "network_tx_bytes": 8192,
+                "block_read_bytes": 1024,
+                "block_write_bytes": 2048,
+                "pids": 9,
+                "system_load_1": 0.8,
+                "system_load_5": 0.7,
+                "system_load_15": 0.6,
+            }
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = NTCStore(str(Path(tempdir) / "ntccast.db"))
+            monitor = record_resource_monitoring(
+                store,
+                docker_socket_path="/tmp/docker.sock",
+                container_names=["ntc-webcall", "ntc-hls-nginx"],
+                retain_days=14,
+                collect_stats=fake_collect,
+            )
+
+            self.assertTrue(monitor["recorded"])
+            self.assertEqual(monitor["errors"], [])
+            summary = store.system_resource_summary(window_seconds=300)
+            self.assertEqual(summary["containers"]["ntc-webcall"]["max_cpu_percent"], 37.5)
+            self.assertEqual(summary["containers"]["ntc-hls-nginx"]["sample_count"], 1)
 
     def test_check_client_routes_handles_secure_session_cookie_over_internal_http(self):
         with _ProbeServer(secure_redirect=True) as server:
