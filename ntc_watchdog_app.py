@@ -1085,7 +1085,7 @@ def evaluate_hosts(store: NTCStore, *, heartbeat_stale_seconds: int, startup_gra
                 )
             )
 
-        if online and last_error:
+        if desired_active and online and last_error:
             issues.append(
                 WatchdogIssue(
                     severity="warn",

@@ -164,6 +164,30 @@ class NTCWatchdogTests(unittest.TestCase):
 
         self.assertEqual([issue.code for issue in issues], ["preferred-device-missing"])
 
+    def test_evaluate_hosts_ignores_runtime_error_when_public_room_idle(self):
+        class FakeStore:
+            def list_hosts(self):
+                return [
+                    {
+                        "slug": "hp-envy-16-ad0xx",
+                        "label": "HP Envy 16-ad0xx",
+                        "room_slug": "room-a",
+                        "desired_active": False,
+                        "preferred_audio_pattern": "SQ",
+                        "device_order": [],
+                        "runtime": {
+                            "last_seen_at": "2099-01-01T00:00:00+00:00",
+                            "is_ingesting": True,
+                            "current_device": "SQ 1&2 (SQ)",
+                            "last_error": "No program audio detected for 15 seconds.",
+                        },
+                    }
+                ]
+
+        issues = evaluate_hosts(FakeStore(), heartbeat_stale_seconds=45, startup_grace_seconds=25)
+
+        self.assertEqual(issues, [])
+
     def test_save_state_supports_concurrent_writers(self):
         with tempfile.TemporaryDirectory() as tempdir:
             state_path = str(Path(tempdir) / "watchdog-state.json")
