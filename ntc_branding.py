@@ -51,20 +51,24 @@ def _brand_style(background_url: str) -> str:
         background: #050913;
       }}
       body {{
-        background-image:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
+        background:
+          linear-gradient(180deg, rgba(5, 10, 18, 0.50), rgba(5, 10, 18, 0.88)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
-          url("{background_url}");
-        background-size: cover, auto, auto, cover;
-        background-position: center, top left, top right, center;
-        background-repeat: no-repeat;
-        background-attachment: fixed, fixed, fixed, fixed;
+          #050913;
+        position: relative;
+        isolation: isolate;
+        overflow-x: hidden;
       }}
-      @supports (-webkit-touch-callout: none) {{
-        body {{
-          background-attachment: scroll, scroll, scroll, scroll;
-        }}
+      body::before {{
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background: url("{background_url}") center / cover no-repeat;
+        opacity: 0.31;
+        filter: saturate(1.08) contrast(1.04) brightness(0.9);
       }}
     </style>
     """
