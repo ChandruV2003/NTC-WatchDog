@@ -27,6 +27,7 @@ class _ProbeHandler(BaseHTTPRequestHandler):
     empty_playlist = False
     secure_redirect = False
     prefixed_segment = False
+    status_has_chunks = True
     playlist_requests = []
 
     def log_message(self, format, *args):
@@ -61,14 +62,16 @@ class _ProbeHandler(BaseHTTPRequestHandler):
             active = "true" if self.status_active else "false"
             ingesting = "true" if self.status_ingesting else "false"
             desired = "true" if self.status_desired else "false"
+            last_chunk_at = '"2026-06-21T01:23:45+00:00"' if self.status_has_chunks else "null"
             payload = (
                 '{"slug": "room-b", "host_slug": "hp-pavilion-14m-ba1xx", '
                 '"room_alias": "Room B", "broadcasting": %s, "is_ingesting": %s, '
                 '"desired_active": %s, "listener_count": 1, "current_device": "CQ 1&2", '
                 '"stream_transport": "hls", "connection_quality_percent": 100, '
                 '"connection_quality_label": "Buffered", "signal_level_db": -24.5, '
-                '"signal_peak_db": -6.5, "signal_level_percent": 72, "signal_peak_percent": 91}'
-            ) % (active, ingesting, desired)
+                '"signal_peak_db": -6.5, "signal_level_percent": 72, '
+                '"signal_peak_percent": 91, "last_chunk_at": %s}'
+            ) % (active, ingesting, desired, last_chunk_at)
             self.wfile.write(payload.encode("utf-8"))
             return
         if self.path.startswith("/listen/live.m3u8"):
@@ -107,6 +110,7 @@ class _ProbeServer:
         status_active=True,
         status_ingesting=False,
         status_desired=False,
+        status_has_chunks=True,
     ):
         handler = type(
             "ProbeHandler",
@@ -118,6 +122,7 @@ class _ProbeServer:
                 "status_active": status_active,
                 "status_ingesting": status_ingesting,
                 "status_desired": status_desired,
+                "status_has_chunks": status_has_chunks,
                 "playlist_requests": [],
             },
         )
@@ -180,6 +185,31 @@ class NTCWatchdogTests(unittest.TestCase):
                             "is_ingesting": True,
                             "current_device": "SQ 1&2 (SQ)",
                             "last_error": "No program audio detected for 15 seconds.",
+                        },
+                    }
+                ]
+
+        issues = evaluate_hosts(FakeStore(), heartbeat_stale_seconds=45, startup_grace_seconds=25)
+
+        self.assertEqual(issues, [])
+
+    def test_evaluate_hosts_ignores_cold_standby_fallback_without_device(self):
+        class FakeStore:
+            def list_hosts(self):
+                return [
+                    {
+                        "slug": "hp-envy-16-ad0xx",
+                        "label": "HP Envy 16-ad0xx",
+                        "room_slug": "room-a",
+                        "desired_active": True,
+                        "preferred_audio_pattern": "SQ",
+                        "device_order": [],
+                        "runtime": {
+                            "desired_active": False,
+                            "last_seen_at": "2099-01-01T00:00:00+00:00",
+                            "is_ingesting": False,
+                            "current_device": "",
+                            "last_error": "",
                         },
                     }
                 ]
@@ -294,6 +324,15 @@ class NTCWatchdogTests(unittest.TestCase):
         self.assertEqual([result.name for result in results], ["public-page", "live-status", "hls-playlist"])
         self.assertEqual(server.server.RequestHandlerClass.playlist_requests, [])
         self.assertEqual(results[-1].details["reason"], "source-not-broadcasting")
+
+    def test_check_client_routes_defers_hls_when_source_has_no_chunks(self):
+        with _ProbeServer(status_active=True, status_ingesting=True, status_desired=True, status_has_chunks=False) as server:
+            results = check_client_routes(server.base_url, public_pin="7070", timeout_seconds=1, hls_timeout_seconds=1)
+
+        self.assertTrue(all(result.ok for result in results))
+        self.assertEqual([result.name for result in results], ["public-page", "live-status", "hls-playlist"])
+        self.assertEqual(server.server.RequestHandlerClass.playlist_requests, [])
+        self.assertEqual(results[-1].details["reason"], "source-no-chunks")
 
     def test_record_audio_level_monitoring_persists_live_status_samples(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -353,6 +353,7 @@ def check_client_routes(
                 "signal_peak_db": live_status.get("signal_peak_db"),
                 "signal_level_percent": live_status.get("signal_level_percent"),
                 "signal_peak_percent": live_status.get("signal_peak_percent"),
+                "last_chunk_at": live_status.get("last_chunk_at"),
             },
         )
 
@@ -376,6 +377,24 @@ def check_client_routes(
                     "desired_active": bool(live_status.get("desired_active")),
                     "current_device": live_status.get("current_device"),
                     "connection_quality_label": live_status.get("connection_quality_label"),
+                },
+            )
+            return results
+        if not live_status.get("last_chunk_at"):
+            add_ok(
+                "hls-playlist",
+                status_url,
+                status_code,
+                0,
+                "HLS probe skipped until source audio chunks arrive",
+                {
+                    "reason": "source-no-chunks",
+                    "broadcasting": bool(live_status.get("broadcasting")),
+                    "is_ingesting": bool(live_status.get("is_ingesting")),
+                    "desired_active": bool(live_status.get("desired_active")),
+                    "current_device": live_status.get("current_device"),
+                    "connection_quality_label": live_status.get("connection_quality_label"),
+                    "last_chunk_at": live_status.get("last_chunk_at"),
                 },
             )
             return results
@@ -1055,7 +1074,10 @@ def evaluate_hosts(store: NTCStore, *, heartbeat_stale_seconds: int, startup_gra
         last_seen = _parse_iso8601(runtime.get("last_seen_at"))
         online = bool(last_seen and last_seen >= heartbeat_cutoff)
         recently_seen = bool(last_seen and last_seen >= startup_cutoff)
-        desired_active = bool(host.get("desired_active"))
+        if "desired_active" in runtime:
+            desired_active = bool(runtime.get("desired_active"))
+        else:
+            desired_active = bool(host.get("desired_active"))
         is_ingesting = bool(runtime.get("is_ingesting"))
         current_device = (runtime.get("current_device") or "").strip()
         last_error = (runtime.get("last_error") or "").strip()
