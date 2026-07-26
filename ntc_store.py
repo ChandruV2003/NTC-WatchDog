@@ -337,6 +337,8 @@ class NTCStore:
                     stream_transport TEXT NOT NULL DEFAULT '',
                     connection_quality_percent REAL,
                     connection_quality_label TEXT NOT NULL DEFAULT '',
+                    phone_output_json TEXT NOT NULL DEFAULT '{}',
+                    web_output_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY(room_slug) REFERENCES rooms(slug) ON DELETE CASCADE,
                     FOREIGN KEY(host_slug) REFERENCES hosts(slug) ON DELETE SET NULL
                 );
@@ -501,6 +503,15 @@ class NTCStore:
                 connection.execute(
                     "ALTER TABLE listener_sessions ADD COLUMN close_reason TEXT NOT NULL DEFAULT ''"
                 )
+
+            audio_level_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(audio_level_samples)").fetchall()
+            }
+            for column_name in ("phone_output_json", "web_output_json"):
+                if column_name not in audio_level_columns:
+                    connection.execute(
+                        f"ALTER TABLE audio_level_samples ADD COLUMN {column_name} TEXT NOT NULL DEFAULT '{{}}'"
+                    )
             self._migrate_room_slugs(connection)
 
     def _migrate_room_slugs(self, connection):
@@ -1787,6 +1798,8 @@ class NTCStore:
         stream_transport: str = "",
         connection_quality_percent: float | None = None,
         connection_quality_label: str = "",
+        phone_output: dict | None = None,
+        web_output: dict | None = None,
         sampled_at: str | None = None,
     ) -> int:
         timestamp = sampled_at or _utc_now()
@@ -1809,9 +1822,11 @@ class NTCStore:
                     current_device,
                     stream_transport,
                     connection_quality_percent,
-                    connection_quality_label
+                    connection_quality_label,
+                    phone_output_json,
+                    web_output_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     room_slug,
@@ -1830,6 +1845,8 @@ class NTCStore:
                     (stream_transport or "").strip(),
                     connection_quality_percent,
                     (connection_quality_label or "").strip(),
+                    json.dumps(phone_output if isinstance(phone_output, dict) else {}, sort_keys=True),
+                    json.dumps(web_output if isinstance(web_output, dict) else {}, sort_keys=True),
                 ),
             )
             return int(cursor.lastrowid)
@@ -1856,7 +1873,8 @@ class NTCStore:
                 """
                 SELECT sampled_at, host_slug, signal_level_db, signal_peak_db,
                        listener_count, broadcasting, is_ingesting, desired_active,
-                       current_device, connection_quality_label
+                       current_device, connection_quality_label,
+                       phone_output_json, web_output_json
                 FROM audio_level_samples
                 WHERE room_slug = ?
                 ORDER BY sampled_at DESC
@@ -1865,6 +1883,15 @@ class NTCStore:
                 (room_slug,),
             ).fetchone()
 
+        latest_payload = dict(latest) if latest else None
+        if latest_payload:
+            for path_key in ("phone", "web"):
+                raw_value = latest_payload.pop(f"{path_key}_output_json", "{}")
+                try:
+                    parsed = json.loads(raw_value or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed = {}
+                latest_payload[f"{path_key}_output"] = parsed if isinstance(parsed, dict) else {}
         summary = {
             "sample_count": int((row or {})["sample_count"] or 0),
             "avg_signal_level_db": (row or {})["avg_signal_level_db"],
@@ -1872,7 +1899,7 @@ class NTCStore:
             "max_signal_level_db": (row or {})["max_signal_level_db"],
             "avg_signal_peak_db": (row or {})["avg_signal_peak_db"],
             "max_signal_peak_db": (row or {})["max_signal_peak_db"],
-            "latest": dict(latest) if latest else None,
+            "latest": latest_payload,
         }
         return summary
 

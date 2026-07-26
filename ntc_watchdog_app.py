@@ -354,6 +354,7 @@ def check_client_routes(
                 "signal_level_percent": live_status.get("signal_level_percent"),
                 "signal_peak_percent": live_status.get("signal_peak_percent"),
                 "last_chunk_at": live_status.get("last_chunk_at"),
+                "audio_output_status": live_status.get("audio_output_status") or {},
             },
         )
 
@@ -513,6 +514,7 @@ def record_audio_level_monitoring(
     signal_level_percent = _float_or_none(details.get("signal_level_percent"))
     signal_peak_percent = _float_or_none(details.get("signal_peak_percent"))
     active = bool(details.get("broadcasting") or details.get("is_ingesting") or details.get("desired_active"))
+    audio_output_status = details.get("audio_output_status") or {}
 
     sample_id = store.record_audio_level_sample(
         room_slug,
@@ -530,6 +532,8 @@ def record_audio_level_monitoring(
         stream_transport=str(details.get("stream_transport") or ""),
         connection_quality_percent=_float_or_none(details.get("connection_quality_percent")),
         connection_quality_label=str(details.get("connection_quality_label") or ""),
+        phone_output=audio_output_status.get("phone") or {},
+        web_output=audio_output_status.get("web") or {},
     )
     store.prune_audio_level_samples(retain_days=retain_days)
 

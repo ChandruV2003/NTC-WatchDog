@@ -70,7 +70,15 @@ class _ProbeHandler(BaseHTTPRequestHandler):
                 '"stream_transport": "hls", "connection_quality_percent": 100, '
                 '"connection_quality_label": "Buffered", "signal_level_db": -24.5, '
                 '"signal_peak_db": -6.5, "signal_level_percent": 72, '
-                '"signal_peak_percent": 91, "last_chunk_at": %s}'
+                '"signal_peak_percent": 91, '
+                '"audio_output_status": {'
+                '"phone": {"path": "phone", "active": true, "status": "auto_leveling", '
+                '"auto_gain_enabled": true, "input_rms_db": -30.0, "output_rms_db": -24.0, '
+                '"total_current_gain_db": 6.0, "auto_gain_adjustment_count": 3}, '
+                '"web": {"path": "web", "active": true, "status": "holding_level", '
+                '"auto_gain_enabled": true, "input_rms_db": -31.0, "output_rms_db": -25.0, '
+                '"total_current_gain_db": 5.0, "held_pause_chunks": 4}'
+                '}, "last_chunk_at": %s}'
             ) % (active, ingesting, desired, last_chunk_at)
             self.wfile.write(payload.encode("utf-8"))
             return
@@ -315,6 +323,10 @@ class NTCWatchdogTests(unittest.TestCase):
         live_status = next(result for result in results if result.name == "live-status")
         self.assertEqual(live_status.details["room_slug"], "room-b")
         self.assertEqual(live_status.details["signal_level_db"], -24.5)
+        self.assertEqual(
+            live_status.details["audio_output_status"]["phone"]["total_current_gain_db"],
+            6.0,
+        )
 
     def test_check_client_routes_defers_hls_when_source_is_not_broadcasting(self):
         with _ProbeServer(status_active=False, status_ingesting=True, status_desired=True) as server:
@@ -354,6 +366,11 @@ class NTCWatchdogTests(unittest.TestCase):
             summary = store.audio_level_summary("room-b", window_seconds=300)
             self.assertEqual(summary["sample_count"], 1)
             self.assertEqual(summary["max_signal_level_db"], -24.5)
+            self.assertEqual(
+                summary["latest"]["phone_output"]["auto_gain_adjustment_count"],
+                3,
+            )
+            self.assertEqual(summary["latest"]["web_output"]["held_pause_chunks"], 4)
 
     def test_record_resource_monitoring_persists_container_samples(self):
         def fake_collect(socket_path, container_name):
