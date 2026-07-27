@@ -558,6 +558,7 @@ class NTCStore:
 
     def _seed_defaults(self):
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             existing_hosts = connection.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
             existing_rooms = connection.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
             if existing_hosts or existing_rooms:
