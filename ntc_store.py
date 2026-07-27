@@ -216,6 +216,8 @@ class NTCStore:
         with self._connect() as connection:
             connection.executescript(
                 """
+                BEGIN IMMEDIATE;
+
                 CREATE TABLE IF NOT EXISTS rooms (
                     slug TEXT PRIMARY KEY,
                     label TEXT NOT NULL,
